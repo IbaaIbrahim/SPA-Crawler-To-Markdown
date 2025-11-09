@@ -1,2 +1,12 @@
 outputs/
 .venv/
+__pycache__/
+*.pyc
+dist/
+build/
+*.egg-info/
+.idea/
+.vscode/
+.DS_Store
+logs/
+*.log
