@@ -15,8 +15,12 @@ class VisitResult:
     raw_html: Optional[str] = None
 
 class SpaCrawler:
-    def __init__(self, start_url: str, same_origin_only: bool = True, max_pages: int = 1000, concurrency: int = 5, timeout_ms: int = 20000, wait_until: str = "networkidle", user_agent: Optional[str] = None, headless: bool = True, extra_headers: Optional[Dict[str, str]] = None, scrape_content: bool = False, max_text_chars: int = 100_000, wait_selector: Optional[str] = None, wait_text_growth_ms: int = 0, include_html: bool = False, screenshot_dir: Optional[str] = None, log_network: bool = False):
-        self.start_url = canonicalize(start_url)
+    def __init__(self, start_url: Optional[str] = None, start_urls: Optional[List[str]] = None, same_origin_only: bool = True, max_pages: int = 1000, concurrency: int = 5, timeout_ms: int = 20000, wait_until: str = "networkidle", user_agent: Optional[str] = None, headless: bool = True, extra_headers: Optional[Dict[str, str]] = None, scrape_content: bool = False, max_text_chars: int = 100_000, wait_selector: Optional[str] = None, wait_text_growth_ms: int = 0, include_html: bool = False, screenshot_dir: Optional[str] = None, log_network: bool = False, discover_links: bool = True, retry_failed: bool = True):
+        self.start_url = canonicalize(start_url) if start_url else None
+        # Normalize and set starting URLs list (prefer start_urls; fall back to start_url)
+        initial_urls = start_urls or ([start_url] if start_url else [])
+        self.start_urls = [canonicalize(u) for u in initial_urls if u]
+
         self.same_origin_only = same_origin_only
         self.max_pages = max_pages
         self.concurrency = concurrency
@@ -32,8 +36,15 @@ class SpaCrawler:
         self.include_html = include_html
         self.screenshot_dir = screenshot_dir
         self.log_network = log_network
+        self.discover_links = discover_links
+        self.retry_failed = retry_failed
+
+        # Base origin to compare for same_origin filter (use first start URL if present)
+        self.origin_base_url = self.start_urls[0] if self.start_urls else self.start_url
+
         self.visited: Set[str] = set()
         self.results: List[VisitResult] = []
+        self.failed_urls: List[Tuple[str, int]] = []  # Track URLs that timed out or failed
         self.queue: asyncio.Queue[Tuple[str, int]] = asyncio.Queue()
 
     async def _extract_links(self, page) -> List[str]:
@@ -206,6 +217,7 @@ class SpaCrawler:
     async def _visit(self, browser, url: str, depth: int) -> Tuple[Optional[int], Optional[str], Optional[str], Optional[str]]:
         context = await browser.new_context(user_agent=self.user_agent, extra_http_headers=self.extra_headers)
         page = await context.new_page()
+        is_timeout_error = False
         try:
             network_log: List[Dict] = []
             if self.log_network:
@@ -243,12 +255,13 @@ class SpaCrawler:
             
             # Additional wait for any lazy-loaded content
             await page.wait_for_timeout(250)
-            links = await self._extract_links(page)
-            for link in links:
-                if self.same_origin_only and not same_origin(self.start_url, link):
-                    continue
-                if link not in self.visited and len(self.visited) + self.queue.qsize() < self.max_pages:
-                    await self.queue.put((link, depth + 1))
+            if self.discover_links:
+                links = await self._extract_links(page)
+                for link in links:
+                    if self.same_origin_only and self.origin_base_url and not same_origin(self.origin_base_url, link):
+                        continue
+                    if link not in self.visited and len(self.visited) + self.queue.qsize() < self.max_pages:
+                        await self.queue.put((link, depth + 1))
             title = None
             text = None
             raw_html = None
@@ -332,10 +345,17 @@ class SpaCrawler:
             return status, title, text, raw_html
         except Exception as e:
             import traceback
+            # Check if it's a timeout error
+            error_str = str(e).lower()
+            if 'timeout' in error_str or 'exceeded' in error_str:
+                is_timeout_error = True
             print(f"Error visiting {url}: {e}")
             traceback.print_exc()
             return None, None, None, None
         finally:
+            # Track failed/timed-out URLs for retry
+            if is_timeout_error and self.retry_failed:
+                self.failed_urls.append((url, depth))
             await context.close()
 
     async def _worker(self, browser, pbar):
@@ -354,7 +374,13 @@ class SpaCrawler:
             self.queue.task_done()
 
     async def run(self):
-        await self.queue.put((self.start_url, 0))
+        # Seed initial queue with provided URLs
+        if self.start_urls:
+            for u in self.start_urls:
+                await self.queue.put((u, 0))
+        elif self.start_url:
+            await self.queue.put((self.start_url, 0))
+        
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=self.headless)
             try:
@@ -364,6 +390,42 @@ class SpaCrawler:
                     for w in workers:
                         w.cancel()
                     await asyncio.gather(*workers, return_exceptions=True)
+                
+                # Retry failed URLs with doubled timeout and wait_text_growth_ms
+                if self.retry_failed and self.failed_urls:
+                    original_timeout = self.timeout_ms
+                    original_wait_text_growth_ms = self.wait_text_growth_ms
+                    self.timeout_ms = original_timeout * 2
+                    self.wait_text_growth_ms = original_wait_text_growth_ms * 2 if original_wait_text_growth_ms > 0 else 0
+                    retry_count = len(self.failed_urls)
+                    print(f"\n{retry_count} URLs timed out. Retrying with timeout={self.timeout_ms}ms and wait_text_growth_ms={self.wait_text_growth_ms}ms...")
+
+                    # Remove failed URLs from visited set so they can be retried
+                    for url, _ in self.failed_urls:
+                        if url in self.visited:
+                            self.visited.remove(url)
+
+                    # Re-queue failed URLs
+                    for url, depth in self.failed_urls:
+                        await self.queue.put((url, depth))
+
+                    # Clear failed list for this retry round
+                    self.failed_urls.clear()
+
+                    # Run workers again for retry
+                    with tqdm(total=retry_count, desc="Retrying", unit="page") as retry_pbar:
+                        workers = [asyncio.create_task(self._worker(browser, retry_pbar)) for _ in range(self.concurrency)]
+                        await self.queue.join()
+                        for w in workers:
+                            w.cancel()
+                        await asyncio.gather(*workers, return_exceptions=True)
+
+                    # Restore original timeout and wait_text_growth_ms
+                    self.timeout_ms = original_timeout
+                    self.wait_text_growth_ms = original_wait_text_growth_ms
+
+                    if self.failed_urls:
+                        print(f"\n{len(self.failed_urls)} URLs still failed after retry.")
             finally:
                 await browser.close()
 

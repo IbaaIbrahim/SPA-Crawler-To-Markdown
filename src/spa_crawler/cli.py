@@ -6,7 +6,9 @@ from .crawler import SpaCrawler
 
 def main():
     parser = argparse.ArgumentParser(description="Crawl a React SPA and export discovered links.")
-    parser.add_argument("--start-url", required=True, help="Starting URL of the SPA.")
+    parser.add_argument("--start-url", required=False, help="Starting URL of the SPA.")
+    parser.add_argument("--urls-file", required=False, help="Path to a JSON file containing a list of URLs (e.g., outputs/sitemap.json).")
+    parser.add_argument("--no-discover", action="store_true", help="Do not discover new links; only visit the provided URLs.")
     parser.add_argument("--out", default="outputs/sitemap.json", help="Path to JSON output.")
     parser.add_argument("--same-origin", type=str, default="true", help="Limit to same origin (true/false).")
     parser.add_argument("--concurrency", type=int, default=5)
@@ -19,18 +21,65 @@ def main():
     parser.add_argument("--wait-selector", type=str, default=None, help="CSS selector to wait for before extracting content.")
     parser.add_argument("--wait-text-growth-ms", type=int, default=0, help="Poll for text growth up to N milliseconds (dynamic content).")
     parser.add_argument("--include-html", type=str, default="false", help="Include raw HTML for each page (true/false).")
+    parser.add_argument("--retry-failed", type=str, default="true", help="Automatically retry timed-out URLs with doubled timeout (true/false).")
 
     args = parser.parse_args()
+
+    if not args.start_url and not args.urls_file:
+        parser.error("You must provide either --start-url or --urls-file")
+
     same_origin = args.same_origin.lower() == "true"
     headless = args.headless.lower() == "true"
     scrape = args.scrape.lower() == "true"
     include_html = args.include_html.lower() == "true"
+    retry_failed = args.retry_failed.lower() == "true"
 
     out_json = Path(args.out)
     out_json.parent.mkdir(parents=True, exist_ok=True)
 
+    # Load URLs from file if provided
+    start_urls = None
+    if args.urls_file:
+        p = Path(args.urls_file)
+        if not p.exists():
+            parser.error(f"URLs file not found: {args.urls_file}")
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception as e:
+            parser.error(f"Failed to parse URLs file: {e}")
+        urls: list[str] = []
+        def collect_from(obj):
+            nonlocal urls
+            if isinstance(obj, list):
+                for item in obj:
+                    collect_from(item)
+            elif isinstance(obj, dict):
+                # common keys that may hold URLs
+                for key in ("url", "href", "loc", "link"):  # sitemap variants
+                    v = obj.get(key)
+                    if isinstance(v, str):
+                        urls.append(v)
+                # nested arrays commonly used
+                for key in ("urls", "links", "items", "pages"):
+                    if key in obj and isinstance(obj[key], list):
+                        collect_from(obj[key])
+            elif isinstance(obj, str):
+                urls.append(obj)
+        collect_from(data)
+        # de-duplicate while preserving order
+        seen = set()
+        deduped = []
+        for u in urls:
+            if not isinstance(u, str):
+                continue
+            if u not in seen:
+                seen.add(u)
+                deduped.append(u)
+        start_urls = deduped
+
     crawler = SpaCrawler(
         start_url=args.start_url,
+        start_urls=start_urls,
         same_origin_only=same_origin,
         max_pages=args.max_pages,
         concurrency=args.concurrency,
@@ -41,6 +90,8 @@ def main():
         wait_selector=args.wait_selector,
         wait_text_growth_ms=args.wait_text_growth_ms,
         include_html=include_html,
+        discover_links=(not args.no_discover),
+        retry_failed=retry_failed,
     )
 
     asyncio.run(crawler.run())
