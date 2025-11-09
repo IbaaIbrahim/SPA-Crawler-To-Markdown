@@ -1,0 +1,2 @@
+[console_scripts]
+spa-crawler = spa_crawler.cli:main

@@ -1,0 +1,13 @@
+README.md
+pyproject.toml
+src/spa_crawler/__init__.py
+src/spa_crawler/__main__.py
+src/spa_crawler/cli.py
+src/spa_crawler/crawler.py
+src/spa_crawler/utils.py
+src/spa_crawler.egg-info/PKG-INFO
+src/spa_crawler.egg-info/SOURCES.txt
+src/spa_crawler.egg-info/dependency_links.txt
+src/spa_crawler.egg-info/entry_points.txt
+src/spa_crawler.egg-info/requires.txt
+src/spa_crawler.egg-info/top_level.txt
