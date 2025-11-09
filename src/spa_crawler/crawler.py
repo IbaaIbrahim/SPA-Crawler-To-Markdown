@@ -15,7 +15,7 @@ class VisitResult:
     raw_html: Optional[str] = None
 
 class SpaCrawler:
-    def __init__(self, start_url: Optional[str] = None, start_urls: Optional[List[str]] = None, same_origin_only: bool = True, max_pages: int = 1000, concurrency: int = 5, timeout_ms: int = 20000, wait_until: str = "networkidle", user_agent: Optional[str] = None, headless: bool = True, extra_headers: Optional[Dict[str, str]] = None, scrape_content: bool = False, max_text_chars: int = 100_000, wait_selector: Optional[str] = None, wait_text_growth_ms: int = 0, include_html: bool = False, screenshot_dir: Optional[str] = None, log_network: bool = False, discover_links: bool = True, retry_failed: bool = True):
+    def __init__(self, start_url: Optional[str] = None, start_urls: Optional[List[str]] = None, same_origin_only: bool = True, max_pages: int = 1000, concurrency: int = 5, timeout_ms: int = 20000, wait_until: str = "networkidle", user_agent: Optional[str] = None, headless: bool = True, extra_headers: Optional[Dict[str, str]] = None, scrape_content: bool = False, max_text_chars: int = 100_000, wait_selector: Optional[str] = None, wait_text_growth_ms: int = 0, include_html: bool = False, screenshot_dir: Optional[str] = None, log_network: bool = False, log_console: bool = False, discover_links: bool = True, retry_failed: bool = True):
         self.start_url = canonicalize(start_url) if start_url else None
         # Normalize and set starting URLs list (prefer start_urls; fall back to start_url)
         initial_urls = start_urls or ([start_url] if start_url else [])
@@ -36,6 +36,7 @@ class SpaCrawler:
         self.include_html = include_html
         self.screenshot_dir = screenshot_dir
         self.log_network = log_network
+        self.log_console = log_console
         self.discover_links = discover_links
         self.retry_failed = retry_failed
 
@@ -223,14 +224,38 @@ class SpaCrawler:
             if self.log_network:
                 def _on_response(resp):
                     try:
-                        network_log.append({
+                        entry = {
                             "url": resp.url,
                             "status": resp.status,
                             "content_type": resp.headers.get('content-type', '')
-                        })
+                        }
+                        network_log.append(entry)
+                        # Print only problematic responses to keep noise low
+                        if resp.status and resp.status >= 400:
+                            print(f"[network:{resp.status}] {resp.url} ({entry['content_type']})")
                     except Exception:
                         pass
                 page.on("response", _on_response)
+
+            # Log page console and runtime errors when enabled
+            if self.log_console:
+                def _on_console(msg):
+                    try:
+                        t = msg.type
+                        # Only surface warnings and errors by default
+                        if t in ("warning", "error"):  # Playwright types: 'log','debug','info','warning','error'
+                            loc = msg.location
+                            where = f"{loc.get('url','') or page.url}:{loc.get('lineNumber','?')}:{loc.get('columnNumber','?')}" if isinstance(loc, dict) else page.url
+                            print(f"[console:{t}] {url} :: {where} :: {msg.text}")
+                    except Exception:
+                        pass
+                def _on_page_error(err):
+                    try:
+                        print(f"[pageerror] {url} :: {err}")
+                    except Exception:
+                        pass
+                page.on("console", _on_console)
+                page.on("pageerror", _on_page_error)
             resp = await page.goto(url, timeout=self.timeout_ms, wait_until=self.wait_until)
             status = resp.status if resp else None
             

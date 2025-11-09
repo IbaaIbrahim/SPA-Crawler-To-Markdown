@@ -22,6 +22,8 @@ def main():
     parser.add_argument("--wait-text-growth-ms", type=int, default=0, help="Poll for text growth up to N milliseconds (dynamic content).")
     parser.add_argument("--include-html", type=str, default="false", help="Include raw HTML for each page (true/false).")
     parser.add_argument("--retry-failed", type=str, default="true", help="Automatically retry timed-out URLs with doubled timeout (true/false).")
+    parser.add_argument("--log-console", type=str, default="false", help="Print page console warnings/errors and runtime errors (true/false).")
+    parser.add_argument("--log-network", type=str, default="false", help="Print network responses with status >= 400 (true/false).")
 
     args = parser.parse_args()
 
@@ -33,6 +35,8 @@ def main():
     scrape = args.scrape.lower() == "true"
     include_html = args.include_html.lower() == "true"
     retry_failed = args.retry_failed.lower() == "true"
+    log_console = args.log_console.lower() == "true"
+    log_network = args.log_network.lower() == "true"
 
     out_json = Path(args.out)
     out_json.parent.mkdir(parents=True, exist_ok=True)
@@ -90,6 +94,8 @@ def main():
         wait_selector=args.wait_selector,
         wait_text_growth_ms=args.wait_text_growth_ms,
         include_html=include_html,
+        log_network=log_network,
+        log_console=log_console,
         discover_links=(not args.no_discover),
         retry_failed=retry_failed,
     )
