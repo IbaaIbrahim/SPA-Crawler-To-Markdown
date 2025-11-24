@@ -10,18 +10,20 @@ class VisitResult:
     url: str
     status: Optional[int]
     depth: int
+    parent_url: Optional[str] = None
     title: Optional[str] = None
     text: Optional[str] = None
     raw_html: Optional[str] = None
 
 class SpaCrawler:
-    def __init__(self, start_url: Optional[str] = None, start_urls: Optional[List[str]] = None, same_origin_only: bool = True, max_pages: int = 1000, concurrency: int = 5, timeout_ms: int = 20000, wait_until: str = "networkidle", user_agent: Optional[str] = None, headless: bool = True, extra_headers: Optional[Dict[str, str]] = None, scrape_content: bool = False, max_text_chars: int = 100_000, wait_selector: Optional[str] = None, wait_text_growth_ms: int = 0, include_html: bool = False, screenshot_dir: Optional[str] = None, log_network: bool = False, log_console: bool = False, discover_links: bool = True, retry_failed: bool = True):
+    def __init__(self, start_url: Optional[str] = None, start_urls: Optional[List[str]] = None, same_origin_only: bool = True, max_pages: int = 1000, concurrency: int = 5, timeout_ms: int = 20000, wait_until: str = "networkidle", user_agent: Optional[str] = None, headless: bool = True, extra_headers: Optional[Dict[str, str]] = None, scrape_content: bool = False, max_text_chars: int = 100_000, wait_selector: Optional[str] = None, wait_text_growth_ms: int = 0, include_html: bool = False, screenshot_dir: Optional[str] = None, log_network: bool = False, log_console: bool = False, discover_links: bool = True, retry_failed: bool = True, url_pattern: Optional[str] = None):
         self.start_url = canonicalize(start_url) if start_url else None
         # Normalize and set starting URLs list (prefer start_urls; fall back to start_url)
         initial_urls = start_urls or ([start_url] if start_url else [])
         self.start_urls = [canonicalize(u) for u in initial_urls if u]
 
         self.same_origin_only = same_origin_only
+        self.url_pattern = url_pattern
         self.max_pages = max_pages
         self.concurrency = concurrency
         self.timeout_ms = timeout_ms
@@ -45,8 +47,8 @@ class SpaCrawler:
 
         self.visited: Set[str] = set()
         self.results: List[VisitResult] = []
-        self.failed_urls: List[Tuple[str, int]] = []  # Track URLs that timed out or failed
-        self.queue: asyncio.Queue[Tuple[str, int]] = asyncio.Queue()
+        self.failed_urls: List[Tuple[str, int, Optional[str]]] = []  # Track URLs that timed out or failed
+        self.queue: asyncio.Queue[Tuple[str, int, Optional[str]]] = asyncio.Queue()
 
     async def _extract_links(self, page) -> List[str]:
         # Collect links from the main page and all frames (helps with sites that render inside iframes)
@@ -285,8 +287,12 @@ class SpaCrawler:
                 for link in links:
                     if self.same_origin_only and self.origin_base_url and not same_origin(self.origin_base_url, link):
                         continue
+                    # Filter by URL pattern if specified
+                    if self.url_pattern and not link.startswith(self.url_pattern):
+                        continue
                     if link not in self.visited and len(self.visited) + self.queue.qsize() < self.max_pages:
-                        await self.queue.put((link, depth + 1))
+                        # Propagate parent_url for the discovered link
+                        await self.queue.put((link, depth + 1, url))
             title = None
             text = None
             raw_html = None
@@ -380,13 +386,22 @@ class SpaCrawler:
         finally:
             # Track failed/timed-out URLs for retry
             if is_timeout_error and self.retry_failed:
-                self.failed_urls.append((url, depth))
+                # Preserve the parent_url by peeking at the current task's context if available is not trivial,
+                # so we track None here; worker passes actual parent_url when available.
+                # The worker handles re-queueing with preserved parent_url below.
+                self.failed_urls.append((url, depth, None))
             await context.close()
 
     async def _worker(self, browser, pbar):
         while True:
             try:
-                url, depth = await asyncio.wait_for(self.queue.get(), timeout=1.0)
+                item = await asyncio.wait_for(self.queue.get(), timeout=1.0)
+                # Support both old and new tuple sizes for safety
+                if isinstance(item, tuple) and len(item) == 3:
+                    url, depth, parent_url = item
+                else:
+                    url, depth = item  # type: ignore
+                    parent_url = None
             except asyncio.TimeoutError:
                 return
             if url in self.visited or len(self.visited) >= self.max_pages:
@@ -394,7 +409,7 @@ class SpaCrawler:
                 continue
             self.visited.add(url)
             status, title, text, raw_html = await self._visit(browser, url, depth)
-            self.results.append(VisitResult(url=url, status=status, depth=depth, title=title, text=text, raw_html=raw_html))
+            self.results.append(VisitResult(url=url, status=status, depth=depth, parent_url=parent_url, title=title, text=text, raw_html=raw_html))
             pbar.update(1)
             self.queue.task_done()
 
@@ -402,9 +417,9 @@ class SpaCrawler:
         # Seed initial queue with provided URLs
         if self.start_urls:
             for u in self.start_urls:
-                await self.queue.put((u, 0))
+                await self.queue.put((u, 0, None))
         elif self.start_url:
-            await self.queue.put((self.start_url, 0))
+            await self.queue.put((self.start_url, 0, None))
         
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=self.headless)
@@ -426,13 +441,13 @@ class SpaCrawler:
                     print(f"\n{retry_count} URLs timed out. Retrying with timeout={self.timeout_ms}ms and wait_text_growth_ms={self.wait_text_growth_ms}ms...")
 
                     # Remove failed URLs from visited set so they can be retried
-                    for url, _ in self.failed_urls:
+                    for url, _, _ in self.failed_urls:
                         if url in self.visited:
                             self.visited.remove(url)
 
                     # Re-queue failed URLs
-                    for url, depth in self.failed_urls:
-                        await self.queue.put((url, depth))
+                    for url, depth, parent_url in self.failed_urls:
+                        await self.queue.put((url, depth, parent_url))
 
                     # Clear failed list for this retry round
                     self.failed_urls.clear()

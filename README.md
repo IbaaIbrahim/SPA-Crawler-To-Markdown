@@ -10,18 +10,47 @@ A Playwright-based crawler designed for React SPAs and dynamic JavaScript applic
 - **Multiple Output Formats**: JSON (structured data) and Markdown (combined or per-page)
 - **Configurable Crawling**: Control concurrency, timeouts, wait conditions, and more
 
-## Install
+## Installation
+
+This project uses a **src-layout** structure, which requires proper installation to work correctly.
+
+### Step 1: Create and activate a virtual environment (recommended)
 
 ```bash
-pip install -e .
-playwright install chromium
+# Create virtual environment
+python3 -m venv .venv
+
+# Activate it (Linux/Mac)
+source .venv/bin/activate
+
+# Or on Windows
+.venv\Scripts\activate
 ```
 
-Or using requirements.txt:
+### Step 2: Install the package in editable mode
 
 ```bash
-pip install -r requirements.txt
-playwright install chromium
+# Install the package
+python3 -m pip install -e .
+
+# Install Playwright browser
+python3 -m playwright install chromium
+```
+
+**Why `pip install -e .`?** The package code is in `src/spa_crawler/`, not at the project root. The editable install adds it to Python's module search path, making it importable as `spa_crawler` from anywhere.
+
+### Alternative: Run without installation
+
+If you prefer not to install, you can run directly from the src directory:
+
+```bash
+cd src && python3 -m spa_crawler --start-url "https://example.com"
+```
+
+Or set PYTHONPATH:
+
+```bash
+PYTHONPATH=src python3 -m spa_crawler --start-url "https://example.com"
 ```
 
 ## Basic Usage
@@ -29,7 +58,7 @@ playwright install chromium
 ### Crawl and extract links only
 
 ```bash
-python -m spa_crawler \
+python3 -m spa_crawler \
   --start-url "https://your-react-app.example" \
   --out "outputs/sitemap.json"
 ```
@@ -37,7 +66,7 @@ python -m spa_crawler \
 ### Crawl and scrape full content
 
 ```bash
-python -m spa_crawler \
+python3 -m spa_crawler \
   --start-url "https://your-react-app.example" \
   --out "outputs/sitemap.json" \
   --scrape true \
@@ -51,7 +80,7 @@ This creates:
 ### Seed from existing sitemap (re-crawl specific URLs)
 
 ```bash
-python -m spa_crawler \
+python3 -m spa_crawler \
   --urls-file "outputs/sitemap.json" \
   --no-discover \
   --scrape true \
@@ -71,6 +100,7 @@ This reads URLs from an existing sitemap and only visits those pages (no new lin
 | `--scrape` | `true` | Scrape page content (title + text) |
 | `--markdown-out` | `None` | Optional: path to combined Markdown output |
 | `--same-origin` | `true` | Limit crawling to same origin |
+| `--url-pattern` | `None` | Only crawl URLs that start with this pattern (e.g., 'https://example.com/docs/') |
 | `--max-pages` | `1000` | Maximum number of pages to crawl |
 | `--concurrency` | `5` | Number of concurrent browser contexts |
 | `--timeout-ms` | `20000` | Page load timeout in milliseconds |
@@ -86,7 +116,7 @@ This reads URLs from an existing sitemap and only visits those pages (no new lin
 ### Knowledge base crawl with content extraction
 
 ```bash
-python -m spa_crawler \
+python3 -m spa_crawler \
   --start-url "https://docs.example.com" \
   --max-pages 100 \
   --scrape true \
@@ -97,7 +127,7 @@ python -m spa_crawler \
 ### Wait for specific content to load
 
 ```bash
-python -m spa_crawler \
+python3 -m spa_crawler \
   --start-url "https://spa.example.com" \
   --wait-selector ".article-body" \
   --wait-text-growth-ms 3000 \
@@ -107,18 +137,32 @@ python -m spa_crawler \
 ### Debug mode with HTML capture
 
 ```bash
-python -m spa_crawler \
+python3 -m spa_crawler \
   --start-url "https://app.example.com" \
   --max-pages 10 \
   --include-html true \
   --headless false
 ```
 
+### Crawl only URLs matching a specific pattern
+
+```bash
+# Only crawl URLs under /help/ path
+python3 -m spa_crawler \
+  --start-url "https://docs.example.com/help/index.html" \
+  --url-pattern "https://docs.example.com/help/" \
+  --max-pages 100 \
+  --scrape true \
+  --markdown-out "outputs/help-docs.md"
+```
+
+This will ignore URLs like `https://docs.example.com/about` or `https://docs.example.com/blog/post1` and only crawl pages that start with the specified pattern.
+
 ### Seed from existing URLs (no discovery)
 
 ```bash
 # Re-scrape specific URLs without discovering new links
-python -m spa_crawler \
+python3 -m spa_crawler \
   --urls-file "outputs/sitemap.json" \
   --no-discover \
   --scrape true \
@@ -130,7 +174,7 @@ python -m spa_crawler \
 
 ```bash
 # Start from known URLs but allow discovery of new links
-python -m spa_crawler \
+python3 -m spa_crawler \
   --urls-file "outputs/seed-urls.json" \
   --max-pages 500 \
   --scrape true
@@ -267,7 +311,7 @@ For React/SPA sites or large knowledge bases, use a two-phase approach for bette
 **Phase 1: URL Discovery (slow, thorough)**
 ```bash
 # Discover all URLs without scraping content
-python -m spa_crawler \
+python3 -m spa_crawler \
   --start-url "https://your-site.com/kb" \
   --scrape false \
   --wait-until load \
@@ -281,7 +325,7 @@ python -m spa_crawler \
 **Phase 2: Content Extraction (fast, parallel)**
 ```bash
 # Scrape content from discovered URLs
-python -m spa_crawler \
+python3 -m spa_crawler \
   --urls-file outputs/all-urls.json \
   --no-discover \
   --scrape true \

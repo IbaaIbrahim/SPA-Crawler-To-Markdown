@@ -24,6 +24,7 @@ def main():
     parser.add_argument("--retry-failed", type=str, default="true", help="Automatically retry timed-out URLs with doubled timeout (true/false).")
     parser.add_argument("--log-console", type=str, default="false", help="Print page console warnings/errors and runtime errors (true/false).")
     parser.add_argument("--log-network", type=str, default="false", help="Print network responses with status >= 400 (true/false).")
+    parser.add_argument("--url-pattern", type=str, default=None, help="Only crawl URLs that start with this pattern (e.g., 'https://example.com/docs/').")
 
     args = parser.parse_args()
 
@@ -98,6 +99,7 @@ def main():
         log_console=log_console,
         discover_links=(not args.no_discover),
         retry_failed=retry_failed,
+        url_pattern=args.url_pattern,
     )
 
     asyncio.run(crawler.run())
