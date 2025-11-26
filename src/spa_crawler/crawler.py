@@ -46,6 +46,7 @@ class SpaCrawler:
         self.origin_base_url = self.start_urls[0] if self.start_urls else self.start_url
 
         self.visited: Set[str] = set()
+        self.queued: Set[str] = set()  # Track URLs already in queue to prevent duplicates
         self.results: List[VisitResult] = []
         self.failed_urls: List[Tuple[str, int, Optional[str]]] = []  # Track URLs that timed out or failed
         self.queue: asyncio.Queue[Tuple[str, int, Optional[str]]] = asyncio.Queue()
@@ -290,7 +291,10 @@ class SpaCrawler:
                     # Filter by URL pattern if specified
                     if self.url_pattern and not link.startswith(self.url_pattern):
                         continue
-                    if link not in self.visited and len(self.visited) + self.queue.qsize() < self.max_pages:
+                    # Prevent duplicate crawling: check both visited and queued sets
+                    if link not in self.visited and link not in self.queued and len(self.visited) + self.queue.qsize() < self.max_pages:
+                        # Mark as queued before adding to queue
+                        self.queued.add(link)
                         # Propagate parent_url for the discovered link
                         await self.queue.put((link, depth + 1, url))
             title = None
@@ -407,7 +411,9 @@ class SpaCrawler:
             if url in self.visited or len(self.visited) >= self.max_pages:
                 self.queue.task_done()
                 continue
+            # Mark as visited and remove from queued set
             self.visited.add(url)
+            self.queued.discard(url)
             status, title, text, raw_html = await self._visit(browser, url, depth)
             self.results.append(VisitResult(url=url, status=status, depth=depth, parent_url=parent_url, title=title, text=text, raw_html=raw_html))
             pbar.update(1)
@@ -417,8 +423,10 @@ class SpaCrawler:
         # Seed initial queue with provided URLs
         if self.start_urls:
             for u in self.start_urls:
+                self.queued.add(u)
                 await self.queue.put((u, 0, None))
         elif self.start_url:
+            self.queued.add(self.start_url)
             await self.queue.put((self.start_url, 0, None))
         
         async with async_playwright() as p:
@@ -444,6 +452,8 @@ class SpaCrawler:
                     for url, _, _ in self.failed_urls:
                         if url in self.visited:
                             self.visited.remove(url)
+                        # Add back to queued set
+                        self.queued.add(url)
 
                     # Re-queue failed URLs
                     for url, depth, parent_url in self.failed_urls:

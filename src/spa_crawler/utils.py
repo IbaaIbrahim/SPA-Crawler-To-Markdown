@@ -1,6 +1,14 @@
 from urllib.parse import urlparse, urljoin, urlunparse, parse_qsl, urlencode
 
 def canonicalize(url: str) -> str:
+    """
+    Canonicalize a URL to prevent duplicate crawling:
+    - Convert to lowercase (scheme and domain)
+    - Remove fragments (#)
+    - Normalize trailing slashes
+    - Sort query parameters
+    - Remove default ports
+    """
     if not url:
         return ""
     p = urlparse(url)
@@ -9,6 +17,9 @@ def canonicalize(url: str) -> str:
     if p.port and not ((scheme == "http" and p.port == 80) or (scheme == "https" and p.port == 443)):
         netloc = f"{netloc}:{p.port}"
     path = p.path or "/"
+    # Normalize trailing slashes: keep trailing slash only for root path
+    if len(path) > 1 and path.endswith('/'):
+        path = path.rstrip('/')
     query_pairs = sorted(parse_qsl(p.query, keep_blank_values=True))
     query = urlencode(query_pairs, doseq=True)
     return urlunparse((scheme, netloc, path, "", query, ""))
