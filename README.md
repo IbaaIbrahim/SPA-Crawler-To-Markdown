@@ -345,3 +345,91 @@ python3 -m spa_crawler \
 ## License
 
 MIT
+
+## Run in Background (Detached)
+
+For long crawls, you can run the crawler in the background so it keeps running after you close the terminal.
+
+Generic pattern:
+
+```bash
+nohup .venv/bin/python -m your_module_or_script > outputs/crawler.log 2>&1 &
+disown
+```
+
+Project-specific example:
+
+```bash
+nohup .venv/bin/python -m spa_crawler \
+  --urls-file outputs/all-urls.json \
+  --no-discover \
+  --scrape true \
+  --wait-until domcontentloaded \
+  --timeout-ms 40000 \
+  --concurrency 2 \
+  --markdown-out outputs/final-content.md \
+  --max-pages 8000 > outputs/crawler.log 2>&1 &
+
+disown
+```
+
+View live logs:
+
+```bash
+tail -f outputs/crawler.log
+```
+
+### Stop the background process
+
+If you saved the PID when starting it:
+
+```bash
+kill "$(cat outputs/crawler.pid)"
+# If it doesn't stop after a while, force it (last resort):
+# kill -9 "$(cat outputs/crawler.pid)"
+```
+
+If you didn't save a PID, find it and stop:
+
+```bash
+# List matching processes
+pgrep -fa "python -m spa_crawler"
+
+# Then kill by PID (replace <PID>)
+kill <PID>
+```
+
+Optional: capture PID when launching for easier stop later:
+
+```bash
+nohup .venv/bin/python -m spa_crawler \
+  --urls-file outputs/all-urls.json \
+  --no-discover \
+  --scrape true \
+  --wait-until domcontentloaded \
+  --timeout-ms 40000 \
+  --concurrency 2 \
+  --markdown-out outputs/final-content.md \
+  --max-pages 8000 > outputs/crawler.log 2>&1 &
+echo $! > outputs/crawler.pid
+disown
+```
+
+Print PID as first line in log (for easy discovery without a PID file):
+
+```bash
+nohup bash -c 'echo "PID $$"; exec .venv/bin/python -m spa_crawler \
+  --urls-file outputs/all-urls.json \
+  --no-discover \
+  --scrape true \
+  --wait-until domcontentloaded \
+  --timeout-ms 40000 \
+  --concurrency 2 \
+  --markdown-out outputs/final-content.md \
+  --max-pages 8000' > outputs/crawler.log 2>&1 &
+disown
+
+# Then check the log for PID:
+head -n1 outputs/crawler.log
+```
+
