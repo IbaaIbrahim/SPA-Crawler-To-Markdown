@@ -25,6 +25,7 @@ def main():
     parser.add_argument("--log-console", type=str, default="false", help="Print page console warnings/errors and runtime errors (true/false).")
     parser.add_argument("--log-network", type=str, default="false", help="Print network responses with status >= 400 (true/false).")
     parser.add_argument("--url-pattern", type=str, default=None, help="Only crawl URLs that start with this pattern (e.g., 'https://example.com/docs/').")
+    parser.add_argument("--stealth", type=str, default="false", help="Enable stealth mode to bypass bot detection (true/false). Sets realistic UA, headers, and patches JS fingerprints.")
 
     args = parser.parse_args()
 
@@ -38,6 +39,7 @@ def main():
     retry_failed = args.retry_failed.lower() == "true"
     log_console = args.log_console.lower() == "true"
     log_network = args.log_network.lower() == "true"
+    stealth = args.stealth.lower() == "true"
 
     out_json = Path(args.out)
     out_json.parent.mkdir(parents=True, exist_ok=True)
@@ -100,6 +102,7 @@ def main():
         discover_links=(not args.no_discover),
         retry_failed=retry_failed,
         url_pattern=args.url_pattern,
+        stealth=stealth,
     )
 
     asyncio.run(crawler.run())

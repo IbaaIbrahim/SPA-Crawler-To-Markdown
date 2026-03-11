@@ -15,8 +15,100 @@ class VisitResult:
     text: Optional[str] = None
     raw_html: Optional[str] = None
 
+# JavaScript injected before any page script executes to remove automation fingerprints
+_STEALTH_INIT_SCRIPT = """
+// 1. Remove the webdriver property entirely
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+// 2. Restore a realistic plugins array
+Object.defineProperty(navigator, 'plugins', {
+  get: () => {
+    const arr = [1, 2, 3, 4, 5].map((_, i) => ({
+      name: ['Chrome PDF Plugin','Chrome PDF Viewer','Native Client','Widevine Content Decryption Module','Microsoft Edge PDF Viewer'][i],
+      filename: ['internal-pdf-viewer','mhjfbmdgcfjbbpaeojofohoefgiehjai','internal-nacl-plugin','widevinecdmadapter.dll','edge-pdf-viewer'][i],
+      description: '',
+      length: 0,
+    }));
+    arr.__proto__ = PluginArray.prototype;
+    return arr;
+  },
+});
+
+// 3. Realistic languages
+Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+
+// 4. Realistic hardware concurrency and device memory
+Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+try { Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 }); } catch(e) {}
+
+// 5. Restore window.chrome that headless removes
+if (!window.chrome) {
+  window.chrome = {
+    runtime: { id: undefined },
+    loadTimes: function() {},
+    csi: function() {},
+    app: {},
+  };
+}
+
+// 6. Prevent permission API from leaking automation
+const _origQuery = window.navigator.permissions && window.navigator.permissions.query;
+if (_origQuery) {
+  window.navigator.permissions.query = (parameters) =>
+    parameters.name === 'notifications'
+      ? Promise.resolve({ state: Notification.permission })
+      : _origQuery(parameters);
+}
+
+// 7. Spoof WebGL vendor/renderer — headless leaks 'SwiftShader'
+try {
+  const getParam = WebGLRenderingContext.prototype.getParameter;
+  WebGLRenderingContext.prototype.getParameter = function(param) {
+    if (param === 37445) return 'Google Inc. (NVIDIA)';  // UNMASKED_VENDOR_WEBGL
+    if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3080 Direct3D11 vs_5_0 ps_5_0, D3D11)';  // UNMASKED_RENDERER_WEBGL
+    return getParam.call(this, param);
+  };
+  const getParam2 = WebGL2RenderingContext.prototype.getParameter;
+  WebGL2RenderingContext.prototype.getParameter = function(param) {
+    if (param === 37445) return 'Google Inc. (NVIDIA)';
+    if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3080 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+    return getParam2.call(this, param);
+  };
+} catch(e) {}
+
+// 8. Canvas fingerprint noise — add imperceptible pixel variation to defeat hash-based detection
+try {
+  const toDataURL = HTMLCanvasElement.prototype.toDataURL;
+  HTMLCanvasElement.prototype.toDataURL = function(type, quality) {
+    const ctx = this.getContext('2d');
+    if (ctx) {
+      const imageData = ctx.getImageData(0, 0, this.width || 1, this.height || 1);
+      imageData.data[0] = imageData.data[0] ^ 1;  // flip 1 bit — invisible but changes hash
+      ctx.putImageData(imageData, 0, 0);
+    }
+    return toDataURL.call(this, type, quality);
+  };
+} catch(e) {}
+
+// 9. Realistic screen dimensions
+try {
+  Object.defineProperty(screen, 'width',       { get: () => 1920 });
+  Object.defineProperty(screen, 'height',      { get: () => 1080 });
+  Object.defineProperty(screen, 'availWidth',  { get: () => 1920 });
+  Object.defineProperty(screen, 'availHeight', { get: () => 1040 });
+  Object.defineProperty(screen, 'colorDepth',  { get: () => 24 });
+  Object.defineProperty(screen, 'pixelDepth',  { get: () => 24 });
+} catch(e) {}
+
+// 10. window.outerWidth/height must match viewport (headless often shows 0)
+try {
+  if (!window.outerWidth)  Object.defineProperty(window, 'outerWidth',  { get: () => 1920 });
+  if (!window.outerHeight) Object.defineProperty(window, 'outerHeight', { get: () => 1080 });
+} catch(e) {}
+""";
+
 class SpaCrawler:
-    def __init__(self, start_url: Optional[str] = None, start_urls: Optional[List[str]] = None, same_origin_only: bool = True, max_pages: int = 1000, concurrency: int = 5, timeout_ms: int = 20000, wait_until: str = "networkidle", user_agent: Optional[str] = None, headless: bool = True, extra_headers: Optional[Dict[str, str]] = None, scrape_content: bool = False, max_text_chars: int = 100_000, wait_selector: Optional[str] = None, wait_text_growth_ms: int = 0, include_html: bool = False, screenshot_dir: Optional[str] = None, log_network: bool = False, log_console: bool = False, discover_links: bool = True, retry_failed: bool = True, url_pattern: Optional[str] = None):
+    def __init__(self, start_url: Optional[str] = None, start_urls: Optional[List[str]] = None, same_origin_only: bool = True, max_pages: int = 1000, concurrency: int = 5, timeout_ms: int = 20000, wait_until: str = "networkidle", user_agent: Optional[str] = None, headless: bool = True, extra_headers: Optional[Dict[str, str]] = None, scrape_content: bool = False, max_text_chars: int = 100_000, wait_selector: Optional[str] = None, wait_text_growth_ms: int = 0, include_html: bool = False, screenshot_dir: Optional[str] = None, log_network: bool = False, log_console: bool = False, discover_links: bool = True, retry_failed: bool = True, url_pattern: Optional[str] = None, stealth: bool = False):
         self.start_url = canonicalize(start_url) if start_url else None
         # Normalize and set starting URLs list (prefer start_urls; fall back to start_url)
         initial_urls = start_urls or ([start_url] if start_url else [])
@@ -41,6 +133,15 @@ class SpaCrawler:
         self.log_console = log_console
         self.discover_links = discover_links
         self.retry_failed = retry_failed
+        self.stealth = stealth
+
+        # Default to a realistic Chrome user agent when stealth is enabled and no explicit UA given
+        if stealth and not self.user_agent:
+            self.user_agent = (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            )
 
         # Base origin to compare for same_origin filter (use first start URL if present)
         self.origin_base_url = self.start_urls[0] if self.start_urls else self.start_url
@@ -219,7 +320,30 @@ class SpaCrawler:
             return ""
 
     async def _visit(self, browser, url: str, depth: int) -> Tuple[Optional[int], Optional[str], Optional[str], Optional[str]]:
-        context = await browser.new_context(user_agent=self.user_agent, extra_http_headers=self.extra_headers)
+        ctx_kwargs: Dict = {
+            "user_agent": self.user_agent,
+            "extra_http_headers": self.extra_headers,
+        }
+        if self.stealth:
+            ctx_kwargs["viewport"] = {"width": 1920, "height": 1080}
+            ctx_kwargs["locale"] = "en-US"
+            ctx_kwargs["timezone_id"] = "America/New_York"
+            # Merge stealth-friendly headers with any caller-supplied ones
+            stealth_headers = {
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+            }
+            stealth_headers.update(self.extra_headers)  # caller headers take precedence
+            ctx_kwargs["extra_http_headers"] = stealth_headers
+        context = await browser.new_context(**ctx_kwargs)
+        if self.stealth:
+            await context.add_init_script(_STEALTH_INIT_SCRIPT)
         page = await context.new_page()
         is_timeout_error = False
         try:
@@ -259,9 +383,57 @@ class SpaCrawler:
                         pass
                 page.on("console", _on_console)
                 page.on("pageerror", _on_page_error)
+            # Track the last navigation response so we can capture the real status
+            # after a Cloudflare JS challenge redirects to the actual page.
+            last_nav_status: List[Optional[int]] = [None]
+            def _on_nav_response(resp):
+                try:
+                    if resp.request.resource_type == "document":
+                        last_nav_status[0] = resp.status
+                except Exception:
+                    pass
+            page.on("response", _on_nav_response)
+
             resp = await page.goto(url, timeout=self.timeout_ms, wait_until=self.wait_until)
             status = resp.status if resp else None
-            
+
+            # Detect Cloudflare / generic bot-protection challenge pages and wait
+            # for the JS challenge to self-resolve before scraping content.
+            _CF_TITLES = (
+                "just a moment", "one more step", "checking your browser",
+                "attention required", "performing security verification",
+                "please wait", "ddos-guard",
+            )
+            try:
+                current_title = (await page.title()).lower()
+            except Exception:
+                current_title = ""
+            if any(t in current_title for t in _CF_TITLES):
+                # Challenge page detected: wait until title changes to something real.
+                # Use up remaining timeout minus a 3 s buffer.
+                challenge_wait = max(self.timeout_ms - 3000, 8000)
+                try:
+                    await page.wait_for_function(
+                        """() => {
+                            const t = (document.title || '').toLowerCase();
+                            return !(
+                                t.includes('just a moment') ||
+                                t.includes('one more step') ||
+                                t.includes('checking your browser') ||
+                                t.includes('attention required') ||
+                                t.includes('performing security verification') ||
+                                t.includes('please wait') ||
+                                t.includes('ddos-guard')
+                            );
+                        }""",
+                        timeout=challenge_wait,
+                    )
+                    # Challenge cleared — use the last captured navigation status
+                    status = last_nav_status[0] or 200
+                    print(f"[stealth] Cloudflare challenge cleared for {url}")
+                except Exception:
+                    print(f"[stealth] Cloudflare challenge did NOT clear within timeout for {url}")
+
             # For React apps: wait for React to hydrate and render
             await page.wait_for_timeout(1000)  # Give React time to hydrate
             
